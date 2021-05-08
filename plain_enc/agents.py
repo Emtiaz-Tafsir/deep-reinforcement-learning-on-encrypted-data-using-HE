@@ -194,7 +194,7 @@ class User:
             User.show_timer(st, i_episode+1)
             if test_phase:
                 test_episodes+=1
-            if i_episode>0 and (i_episode+1)%10==0:
+            if i_episode>0 and (i_episode+1)%60==0:
                 self.cp.save_model(i_episode, max_t, max_t_ep, test_episodes)
 
         print('Complete')
