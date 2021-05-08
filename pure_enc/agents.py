@@ -189,7 +189,7 @@ class User:
             print('Episode: {} \tTraining Loss: {:.6f}'.format(i_episode, train_loss))
             self.cp.update_model(i_episode+1)
             User.show_timer(st, i_episode+1)
-            if i_episode>0 and (i_episode+1)%10==0:
+            if i_episode>0 and (i_episode+1)%5==0:
                 self.cp.save_model(i_episode, max_t, max_t_ep)
 
         print('Complete')
