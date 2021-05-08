@@ -54,8 +54,6 @@ class User:
         )
         context.global_scale = pow(2, bits_scale)
         context.generate_galois_keys()
-        self._sk_= context.secret_key()
-        context.make_context_public()
         self.context = context
             
     def hook(self, platform):
@@ -100,9 +98,27 @@ class User:
         plt.title('Example extracted screen')
         plt.show()
         
-    def send_models_to_cp(self, FILE, EP=0):
+    def save_context(self):
+        serial_context = self.context.serialize(save_secret_key=True)
+        f = open(self.cp.PATH+'/context.bytes', 'wb')
+        f.write(serial_context)
+        f.close()
+        self._sk_= self.context.secret_key()
+        self.context.make_context_public()
+        
+    def _switch_context(self, path):
+        file = open(path, 'rb')
+        serial_context = file.read()
+        self.context = ts.Context.load(serial_context)
+        
+    def send_models_to_cp(self, FILE, CTX, EP=0):
+        if not os.path.exists(CTX):
+            raise FileNotFoundError("Context missing from path")
+        if not os.path.exists(FILE):
+            raise FileNotFoundError("Model missing from path")
         if self.cp is None:
             raise RuntimeError("No active platform found. Please hook one")
+        self._switch_context(CTX)
         self.env.reset()
         init_screen = self.get_screen()
         User.show_sample(init_screen)
@@ -128,6 +144,8 @@ class User:
         self._run()
         
     def _run(self, prev_ep=0, prev_test=0):
+        self.cp.make_dir()
+        self.save_context()
         num_episodes = self.cp.EPISODE
         if num_episodes>=50:
             num_episodes+=(num_episodes//50)*10
@@ -162,13 +180,14 @@ class User:
                     self.cp.optimize_model()
                 state = next_state
                 if done:
+                    if t>max_t:
+                        max_t=t
+                        max_t_ep=i_episode
                     if test_phase:
                         self.cp.update_duration_enc(t+1,test_episodes)
                     else:
                         self.cp.update_duration(t+1,i_episode+1-test_episodes)
-                    if max_t<t:
-                        max_t = t
-                        max_t_ep = i_episode
+                                                                                      
                     break
             # Update the target network, copying all weights and biases in DQN
             self.cp.update_model(i_episode+1-test_episodes)
@@ -279,6 +298,8 @@ class Cloud:
         self.enc_episode_durations = [0]
         self.n_actions = n_actions
         self.model_id = uuid.uuid4().hex
+        
+    def make_dir(self):
         PATH = os.getcwd()+'/prev_models'
         if not os.path.exists(PATH): 
             os.mkdir(PATH)  
@@ -383,9 +404,7 @@ class Cloud:
         
     def load_model(self, FILE, ep):
         check = torch.load(FILE)
-        model_id = check['model_id']
-        self.change_dir(model_id)
-        self.model_id = model_id
+        self.model_id = check['model_id']
         self.policy_net.load_state_dict(check['policy_state'])
         self.target_net.load_state_dict(check['target_state'])
         self.optimizer.load_state_dict(check['optimizer_state'])

@@ -6,9 +6,9 @@ Created on Sun May  2 12:28:53 2021
 """
 import agents as agn
 
-user = agn.User(mode='plain')
+user = agn.User(mode='encrypted')
 platform = agn.Cloud()
-platform.set_parameters(EPISODE = 30,
+platform.set_parameters(EPISODE = 2,
                        BATCH_SIZE = 10, 
                        GAMMA = 0.99, 
                        EPS_START = 0.9,
@@ -17,5 +17,9 @@ platform.set_parameters(EPISODE = 30,
                        TARGET_UPDATE = 10
                        )
 user.hook(platform)
-user.begin_operation()
+#user.begin_operation()
+model_path = 'prev_models/_current/model.pth'
+context_path = 'prev_models/_current/context.bytes'
+user.send_models_to_cp(model_path, context_path, EP=1)
+
 

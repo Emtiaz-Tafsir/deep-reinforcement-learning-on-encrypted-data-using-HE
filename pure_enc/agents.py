@@ -8,6 +8,7 @@ import os
 import gym
 import math
 import random
+import uuid
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
@@ -16,7 +17,6 @@ from collections import namedtuple
 from itertools import count
 from PIL import Image
 from time import time
-from torch.autograd import Variable
 
 import torch
 import torch.nn as nn
@@ -57,8 +57,6 @@ class User:
             )
             context.global_scale = pow(2, bits_scale)
             context.generate_galois_keys()
-            self._sk_= context.secret_key()
-            context.make_context_public()
             self.context = context
             
     def hook(self, platform):
@@ -103,6 +101,38 @@ class User:
                    interpolation='none')
         plt.title('Example extracted screen')
         plt.show()
+        
+    def save_context(self):
+        serial_context = self.context.serialize(save_secret_key=True)
+        f = open(self.cp.PATH+'/context.bytes', 'wb')
+        f.write(serial_context)
+        f.close()
+        self._sk_= self.context.secret_key()
+        self.context.make_context_public()
+        
+    def _switch_context(self, path):
+        file = open(path, 'rb')
+        serial_context = file.read()
+        self.context = ts.Context.load(serial_context)
+
+    def send_models_to_cp(self, FILE, CTX=None, EP=0):
+        if not os.path.exists(FILE):
+            raise FileNotFoundError("Model missing from path")
+        if self.cp is None:
+            raise RuntimeError("No active platform found. Please hook one")
+        if self.mode=='encrypted':
+            if not os.path.exists(CTX):
+                raise FileNotFoundError("Context missing from path")
+            self._switch_context(CTX)
+        self.env.reset()
+        init_screen = self.get_screen()
+        User.show_sample(init_screen)
+        _, _, screen_height, screen_width = init_screen.shape
+        # Get number of actions from gym action space
+        n_actions = self.env.action_space.n
+        self.cp.prepare_model(screen_height,screen_width,n_actions)
+        param = self.cp.load_model(FILE, EP)
+        self._run(param)
     
     def begin_operation(self):
         if self.cp is None:
@@ -116,9 +146,17 @@ class User:
         # Get number of actions from gym action space
         n_actions = self.env.action_space.n
         self.cp.prepare_model(screen_height,screen_width,n_actions)
+        self._run()
+    
+    def _run(self, prev_ep=0):
+        self.cp.make_dir()
+        if self.mode=='encrypted':
+            self.save_context()
         num_episodes = self.cp.EPISODE
         st = time()
-        for i_episode in range(num_episodes):
+        max_t = 0
+        max_t_ep = 0
+        for i_episode in range(prev_ep, num_episodes):
             self.env.reset()
             last_screen = self.get_screen()
             current_screen = self.get_screen()
@@ -142,18 +180,25 @@ class User:
                 train_loss += self.cp.optimize_model()
                 if done:
                     self.cp.update_duration(t+1,i_episode+1)
+                    if max_t<t:
+                        max_t = t
+                        max_t_ep = i_episode
                     break
             # Update the target network, copying all weights and biases in DQN
             train_loss = train_loss / t
             print('Episode: {} \tTraining Loss: {:.6f}'.format(i_episode, train_loss))
             self.cp.update_model(i_episode+1)
             User.show_timer(st, i_episode+1)
+            if i_episode>0 and (i_episode+1)%10==0:
+                self.cp.save_model(i_episode, max_t, max_t_ep)
 
         print('Complete')
         self.env.render()
         self.env.close()
         plt.ioff()
         plt.show()
+        self.cp.save_info(max_t, max_t_ep)
+        self.cp.save_model(i_episode, max_t, max_t_ep)
 
     def encrypt_input(self, state):
         mean_inp = state.mean()
@@ -257,6 +302,16 @@ class Cloud:
         self.memory = model.ReplayMemory(10000,Cloud.Transition)
         self.episode_durations = [0]
         self.n_actions = n_actions
+        self.model_id = uuid.uuid4().hex
+        
+    def make_dir(self):
+        PATH = os.getcwd()+'/prev_models'
+        if not os.path.exists(PATH): 
+            os.mkdir(PATH)  
+        PATH = PATH+'/'+self.model_id
+        if not os.path.exists(PATH): 
+            os.mkdir(PATH)
+        self.PATH = PATH
         
     def select_action(self, state):
         sample = random.random()
@@ -328,8 +383,9 @@ class Cloud:
         if i_episode % self.TARGET_UPDATE == 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
     
-    def save_model(self, episode, t_max, t_max_ep, test):
+    def save_model(self, episode, t_max, t_max_ep):
         checkpoint = {
+                'mode': self.mode,
                 'model_id': self.model_id,
                 'policy_state': self.policy_net.state_dict(),
                 'target_state': self.target_net.state_dict(),
@@ -344,7 +400,6 @@ class Cloud:
                 'eps_d': self.EPS_DECAY, 
                 'target_up': self.TARGET_UPDATE,
                 'steps_done': self.steps_done,
-                'test': test
             }
         torch.save(checkpoint,self.PATH+'/'+str(episode+1)+'.pth')
         f = open(self.PATH+'/'+str(episode+1)+' info.txt', 'w')
@@ -355,9 +410,9 @@ class Cloud:
         
     def load_model(self, FILE, ep):
         check = torch.load(FILE)
-        model_id = check['model_id']
-        self.change_dir(model_id)
-        self.model_id = model_id
+        if check['mode'] != self.mode:
+            raise RuntimeError("loaded model mode must match the current model")
+        self.model_id = check['model_id']
         self.policy_net.load_state_dict(check['policy_state'])
         self.target_net.load_state_dict(check['target_state'])
         self.optimizer.load_state_dict(check['optimizer_state'])
@@ -369,14 +424,11 @@ class Cloud:
         self.TARGET_UPDATE = check['target_up']
         self.steps_done = check['steps_done']
         self.episode_durations = check['episode_duration']
-        self.enc_episode_durations = check['enc_episode_duration']
         self.params_set = True
         self.EPISODE = check['n_episode']+ep
         i_episode = check['i_episode']
-        test = check['test']
-        User.plot_durations(self.episode_durations, i_episode, 2)
-        User.plot_durations(self.enc_episode_durations, test, 3)
-        return i_episode , test
+        User.plot_durations(self.episode_durations, i_episode)
+        return i_episode
             
         
     def save_info(self, t, t_ep):
@@ -399,11 +451,4 @@ class Cloud:
             return int(f.readline()[len('Max T : '):])
         except FileNotFoundError:
             return 0
-    
-    def change_dir(self, model):
-        os.rmdir(self.PATH)
-        PATH = self.PATH[:(-1*len(self.model_id))]+model
-        if not os.path.exists(PATH): 
-            os.mkdir(PATH)
-        self.PATH = PATH
         
